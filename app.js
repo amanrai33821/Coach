@@ -1,7 +1,7 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, FOCUS_START, FOCUS_END, VAPID_PUBLIC_KEY } from './config.js';
 
-const VERSION = '0.5.0';
+const VERSION = '0.5.1';
 const $app = document.getElementById('app');
 const $tabs = document.getElementById('tabs');
 const $toast = document.getElementById('toast');
@@ -365,7 +365,7 @@ function mdToHtml(md) {
 }
 
 // ---------- settings ----------
-const APP_URL = 'https://amanrai33821.github.io/coach/';
+const APP_URL = 'https://amanrai33821.github.io/Coach/';
 const API_URL = 'https://ibgdvsdahuiclvkkqbtx.supabase.co/functions/v1/smooth-responder';
 const API_HOST = new URL(API_URL).host;
 const INSTALL_URL = APP_URL + 'mac/install.sh';

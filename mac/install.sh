@@ -1,7 +1,7 @@
 #!/bin/bash
 # Coach Mac connector: sends your Claude Code activity to your Coach database.
-#   Install:    curl -fsSL https://amanrai33821.github.io/coach/mac/install.sh | bash -s -- <PAIRING_CODE>
-#   Uninstall:  curl -fsSL https://amanrai33821.github.io/coach/mac/install.sh | bash -s -- --uninstall
+#   Install:    curl -fsSL https://amanrai33821.github.io/Coach/mac/install.sh | bash -s -- <PAIRING_CODE>
+#   Uninstall:  curl -fsSL https://amanrai33821.github.io/Coach/mac/install.sh | bash -s -- --uninstall
 # What it does:
 #   - adds a small hook to Claude Code that runs when Claude finishes a reply or a session ends
 #   - the hook saves the new lines of that conversation to ~/.coach/queue (works offline)
