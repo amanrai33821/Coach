@@ -1,21 +1,32 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
-import { SUPABASE_URL, SUPABASE_ANON_KEY, FOCUS_START, FOCUS_END } from './config.js';
+import { SUPABASE_URL, SUPABASE_ANON_KEY, FOCUS_START, FOCUS_END, VAPID_PUBLIC_KEY } from './config.js';
 
-const VERSION = '0.1.0';
+const VERSION = '0.3.0';
 const $app = document.getElementById('app');
 const $tabs = document.getElementById('tabs');
 const $toast = document.getElementById('toast');
 
-const NOTIFY_TYPES = [
-  ['report_ready', 'Morning report ready (8:00)'],
-  ['focus_start', 'Focus block starts (9:00)'],
-  ['noon_checkin', 'Noon check-in (12:00)'],
-  ['timer_forgotten', 'Timer still running after the block'],
-  ['task_events', 'Task started, done or swapped'],
-  ['night_log', 'Night log reminder'],
-  ['weekly_report', 'Weekly report ready (Sunday)'],
+// Fixed by design. Changing one takes a code change, on purpose.
+const RUNNING = [
+  ['Workdays', 'Monday to Friday. Weekends are off.'],
+  ['Focus block', '9:00 AM to 12:00 PM. The timer starts itself.'],
+  ['Focus heads-up alert', '8:45 AM'],
+  ['Focus start alert', '9:00 AM'],
+  ['Noon check-in', '12:00 PM. Submitting it stops the timer.'],
+  ['Timer still running alert', '12:15 PM, if you forgot to check in'],
+  ['Night log reminder', '9:45 PM'],
 ];
-const DEFAULT_PREFS = Object.fromEntries(NOTIFY_TYPES.map(([k]) => [k, true]));
+const DEFAULT_PREFS = {
+  task_events: true,
+  reports: { time: '08:00', daily: true, weekly: true, monthly: true },
+  claude_account: '',
+};
+const loadPrefs = async () => {
+  const { data } = await sb.from('notification_prefs').select('prefs').maybeSingle();
+  const p = data?.prefs || {};
+  return { ...DEFAULT_PREFS, ...p, reports: { ...DEFAULT_PREFS.reports, ...(p.reports || {}) } };
+};
+const savePrefs = (prefs) => sb.from('notification_prefs').upsert({ user_id: user.id, prefs, updated_at: new Date().toISOString() });
 
 // ---------- helpers ----------
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -44,6 +55,30 @@ let tick = null;
 async function logEvent(kind, payload = {}) {
   if (!user) return;
   await sb.from('events').insert({ user_id: user.id, source: 'app', kind, payload });
+}
+
+// ---------- notifications ----------
+const b64ToBytes = (b64) => {
+  const s = atob((b64 + '='.repeat((4 - (b64.length % 4)) % 4)).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(s, (c) => c.charCodeAt(0));
+};
+// Saves this phone as a notification destination. Safe to call on every open.
+async function ensurePushSubscription() {
+  if (!user || !('serviceWorker' in navigator) || !('PushManager' in window) || Notification.permission !== 'granted') return false;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(VAPID_PUBLIC_KEY) });
+    const j = sub.toJSON();
+    const { error } = await sb.from('push_subscriptions').upsert({ user_id: user.id, endpoint: j.endpoint, keys: j.keys }, { onConflict: 'endpoint' });
+    if (error) { console.error(error); return false; }
+    return true;
+  } catch (e) { console.error('push subscribe failed', e); return false; }
+}
+let taskEventsOn = true;
+async function notifyLocal(body) {
+  if (!taskEventsOn || !('Notification' in window) || Notification.permission !== 'granted') return;
+  try { const reg = await navigator.serviceWorker.ready; await reg.showNotification('Coach', { body, icon: 'icons/icon-192.png', tag: 'task' }); } catch {}
 }
 
 // ---------- auth ----------
@@ -105,7 +140,7 @@ async function renderToday() {
   const done = active.filter((t) => t.status === 'done').length;
 
   let focusLabel;
-  if (live) focusLabel = 'Focus block running';
+  if (live) focusLabel = live.auto_started ? 'Focus block running · started automatically' : 'Focus block running';
   else if (weekend) focusLabel = 'Weekend: no focus block';
   else if (now < start) focusLabel = `Focus block starts at ${fmtTime(start)}`;
   else if (now < end) focusLabel = sessions.length ? 'Paused. The block is still on.' : 'You should be in your focus block now';
@@ -127,7 +162,7 @@ async function renderToday() {
 
     <h2>Check-ins</h2>
     <div class="card stack">
-      <div class="row"><div class="grow"><strong>Noon check-in</strong><div class="small muted">Close the focus block: what got done?</div></div>
+      <div class="row"><div class="grow"><strong>Noon check-in</strong><div class="small muted">Closes the block: stops the timer, records what got done</div></div>
         ${has('noon') ? '<span class="badge">Done</span>' : `<button class="small" id="noonBtn" ${now < end && !weekend ? 'disabled' : ''}>Check in</button>`}</div>
       <div class="row"><div class="grow"><strong>Night log</strong><div class="small muted">The rest of the day, and your self-rating</div></div>
         ${has('night') ? '<span class="badge">Done</span>' : '<button class="small" id="nightBtn">Log</button>'}</div>
@@ -142,10 +177,10 @@ async function renderToday() {
   document.getElementById('focusBtn').onclick = async () => {
     if (live) {
       await sb.from('focus_sessions').update({ ended_at: new Date().toISOString() }).eq('id', live.id);
-      await logEvent('focus_stop'); toast('Focus stopped');
+      await logEvent('focus_stop'); toast('Focus stopped'); notifyLocal('Focus stopped.');
     } else {
       await sb.from('focus_sessions').insert({ day: today() });
-      await logEvent('focus_start'); toast('Focus started. Phone down.');
+      await logEvent('focus_start'); toast('Focus started. Phone down.'); notifyLocal('Focus started. Phone down.');
     }
     renderToday();
   };
@@ -156,6 +191,7 @@ async function renderToday() {
     const next = t.status === 'done' ? 'pending' : 'done';
     await sb.from('tasks').update({ status: next, completed_at: next === 'done' ? new Date().toISOString() : null }).eq('id', t.id);
     await logEvent(next === 'done' ? 'task_done' : 'task_undone', { task_id: t.id });
+    if (next === 'done') notifyLocal(`Done: ${t.title}`);
     renderToday();
   }));
   document.querySelectorAll('[data-swap]').forEach((b) => (b.onclick = () => swapDialog(tasks.find((x) => x.id === b.dataset.swap), tasks)));
@@ -175,7 +211,7 @@ function taskHtml(t) {
     </div></div>`;
 }
 
-function openDialog(html, onSubmit) {
+function openDialog(html, onSubmit, after = renderToday) {
   const dlg = document.createElement('dialog');
   dlg.innerHTML = `<form method="dialog" class="stack">${html}
     <div class="row"><button type="button" class="ghost grow" data-cancel>Cancel</button><button class="primary grow" type="submit">Save</button></div></form>`;
@@ -187,7 +223,7 @@ function openDialog(html, onSubmit) {
     const fd = Object.fromEntries(new FormData(e.target));
     const err = await onSubmit(fd);
     if (err) return toast(err);
-    dlg.close(); renderToday();
+    dlg.close(); after();
   };
   dlg.showModal();
 }
@@ -218,17 +254,20 @@ function swapDialog(task, all) {
     const { error: e2 } = await sb.from('tasks').insert({ day: today(), title: f.title, done_criteria: f.done_criteria, swapped_from: task.id, swap_reason: f.reason, source: 'user', sort: task.sort });
     if (e2) return e2.message;
     await logEvent('task_swapped', { from: task.id, reason: f.reason, counted_as_skip: swapsToday >= 1 });
+    notifyLocal(swapsToday >= 1 ? `Second swap today: "${task.title}" counts as skipped.` : `Swapped in: ${f.title}`);
   });
 }
 
 function noonDialog(tasks) {
   openDialog(`<h2 style="margin-top:0">Noon check-in</h2>
-    <p class="small muted">Mark tasks done on the Today screen first. Then be honest here.</p>
+    <p class="small muted">This closes your focus block: it stops the timer and records what the block produced. Mark tasks done on the Today screen first. Then be honest here.</p>
     <div><label>What did you actually produce in the block?</label><textarea name="produced" required></textarea></div>
     <div><label>Where did time leak? (phone, meetings, drifting…)</label><textarea name="leaks"></textarea></div>`,
   async (f) => {
     const { error } = await sb.from('checkins').insert({ day: today(), kind: 'noon', content: { ...f, tasks_done: tasks.filter((t) => t.status === 'done').length, tasks_total: tasks.length } });
     if (error) return error.message;
+    // Closing the block stops any running timer
+    await sb.from('focus_sessions').update({ ended_at: new Date().toISOString() }).eq('day', today()).is('ended_at', null);
     await logEvent('noon_checkin');
   });
 }
@@ -279,43 +318,116 @@ function mdToHtml(md) {
 }
 
 // ---------- settings ----------
+async function lastSeen(source) {
+  const { data } = await sb.from('events').select('occurred_at').eq('source', source).order('occurred_at', { ascending: false }).limit(1);
+  return data?.[0]?.occurred_at || null;
+}
+const seenText = (iso, notYet) => iso
+  ? `Connected · last activity ${new Date(iso).toLocaleString([], { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}`
+  : notYet;
+
 async function renderSettings() {
   clearInterval(tick);
-  const { data } = await sb.from('notification_prefs').select('prefs').maybeSingle();
-  const prefs = { ...DEFAULT_PREFS, ...(data?.prefs || {}) };
+  const [prefs, ccSeen, lastReport] = await Promise.all([
+    loadPrefs(),
+    lastSeen('claude_code'),
+    sb.from('reports').select('created_at').order('created_at', { ascending: false }).limit(1).then((r) => r.data?.[0]?.created_at || null),
+  ]);
+  const name = user.user_metadata?.full_name || '';
+  const initials = (name || user.email).split(/[\s@.]+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
   const perm = 'Notification' in window ? Notification.permission : 'unsupported';
   const permText = { granted: 'On', denied: 'Blocked in iPhone Settings', default: 'Not enabled yet', unsupported: isIOS() && !isStandalone() ? 'Install the app to enable' : 'Not supported here' }[perm];
+  const r = prefs.reports;
 
   $app.innerHTML = `<h1>Settings</h1>
+
+    <div class="card row" style="margin-top:16px">
+      <div class="avatar" aria-hidden="true">${esc(initials)}</div>
+      <div class="grow"><div style="font-weight:600;font-size:17px">${name ? esc(name) : '<span class="muted">Add your name</span>'}</div>
+        <div class="small muted">${esc(user.email)}</div></div>
+      <button class="small ghost" id="editName">Edit</button>
+    </div>
+
+    <h2>Claude account</h2>
+    <div class="card stack">
+      <div class="row"><div class="grow"><strong>Account</strong><div class="small muted">${prefs.claude_account ? esc(prefs.claude_account) : 'Not set'}</div></div>
+        <button class="small ghost" id="editClaude">${prefs.claude_account ? 'Change' : 'Set'}</button></div>
+      <div><strong>Claude Code on your Mac</strong><div class="small muted">${esc(seenText(ccSeen, 'Not connected yet. Set up in Phase 2.'))}</div></div>
+      <div><strong>Morning reviewer</strong><div class="small muted">${esc(lastReport ? `Connected · last report ${new Date(lastReport).toLocaleString([], { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}` : 'Not connected yet. Set up in Phase 2.')}</div></div>
+      <p class="small muted" style="margin:0">Switching accounts: change it here, then recreate the morning reviewer on the new account (about 15 minutes, guided). Claude Code tracking keeps working whichever account is signed in on your Mac.</p>
+    </div>
+
+    <h2>Running parameters</h2>
+    <div class="card">${RUNNING.map(([k, v]) => `<div class="switch"><span>${esc(k)}</span><span class="small muted" style="text-align:right;max-width:58%">${esc(v)}</span></div>`).join('')}</div>
+    <p class="small muted">Non-negotiable, so there are no switches. Changing one takes a code change, on purpose.</p>
+
+    <h2>Reports</h2>
+    <div class="card">
+      <label class="switch"><span>Delivery time</span><input type="time" id="reportTime" value="${esc(r.time)}" min="07:00" max="10:00" step="900" style="width:auto"></label>
+      <label class="switch"><span>Daily report</span><input type="checkbox" data-report="daily" ${r.daily ? 'checked' : ''}></label>
+      <label class="switch"><span>Weekly report <span class="small muted">· Sundays</span></span><input type="checkbox" data-report="weekly" ${r.weekly ? 'checked' : ''}></label>
+      <label class="switch"><span>Monthly report <span class="small muted">· 1st of the month</span></span><input type="checkbox" data-report="monthly" ${r.monthly ? 'checked' : ''}></label>
+    </div>
+    <p class="small muted">Delivery between 7:00 and 10:00 AM; the reviewer runs at 6:30. Reports start in Phase 2.</p>
+
     <h2>Notifications</h2>
     <div class="card stack">
       <div class="row"><div class="grow"><strong>Status</strong><div class="small muted">${esc(permText)}</div></div>
         ${perm === 'default' ? '<button class="primary small" id="enable">Enable</button>' : ''}
         ${perm === 'granted' ? '<button class="small" id="test">Send test</button>' : ''}</div>
+      <label class="switch"><span>Task started, done or swapped</span><input type="checkbox" id="taskEvents" ${prefs.task_events ? 'checked' : ''}></label>
     </div>
-    <div class="card">${NOTIFY_TYPES.map(([k, label]) => `<label class="switch"><span>${esc(label)}</span><input type="checkbox" data-pref="${k}" ${prefs[k] ? 'checked' : ''}></label>`).join('')}</div>
-    <p class="small muted">During 9 to 12, only the noon check-in will make a sound. The rest arrive silently.</p>
+    <p class="small muted">Alerts for the running parameters are always on. During 9 to 12, only the noon check-in makes a sound.</p>
 
-    <h2>Account</h2>
-    <div class="card row"><div class="grow small">${esc(user.email)}</div><button class="small ghost" id="signout">Sign out</button></div>
+    <button class="ghost block" id="signout" style="margin-top:24px">Sign out</button>
     ${isIOS() && !isStandalone() ? installCard() : ''}
     <p class="small muted center">Coach ${VERSION}</p>`;
+
+  const save = async (msg = 'Saved') => { const { error } = await savePrefs(prefs); toast(error ? error.message : msg); };
+
+  document.getElementById('editName').onclick = () => openDialog(`<h2 style="margin-top:0">Your name</h2>
+    <div><label>Name</label><input name="full_name" value="${esc(name)}" autocomplete="name" required></div>`,
+  async (f) => {
+    const { data, error } = await sb.auth.updateUser({ data: { full_name: f.full_name.trim() } });
+    if (error) return error.message;
+    user = data.user;
+  }, renderSettings);
+
+  document.getElementById('editClaude').onclick = () => openDialog(`<h2 style="margin-top:0">Claude account</h2>
+    <p class="small muted">The email you sign in to Claude with. The morning reviewer runs on this account.</p>
+    <div><label>Email</label><input name="claude_account" type="email" value="${esc(prefs.claude_account)}" required></div>`,
+  async (f) => {
+    const changed = prefs.claude_account && prefs.claude_account !== f.claude_account.trim();
+    prefs.claude_account = f.claude_account.trim();
+    const { error } = await savePrefs(prefs);
+    if (error) return error.message;
+    await logEvent('claude_account_set', { changed });
+    if (changed) toast('Saved. Recreate the morning reviewer on the new account.');
+  }, renderSettings);
+
+  document.getElementById('reportTime').onchange = (e) => {
+    const v = e.target.value;
+    if (!v || v < '07:00' || v > '10:00') { e.target.value = r.time; return toast('Pick a time between 7:00 and 10:00 AM'); }
+    r.time = v; save(`Reports at ${fmtTime(atTime(v))}`);
+  };
+  document.querySelectorAll('[data-report]').forEach((el) => (el.onchange = () => {
+    const k = el.dataset.report;
+    if (k === 'daily' && !el.checked && !confirm('Turn off the daily report? It is your main feedback loop, and days without one are not scored.')) { el.checked = true; return; }
+    r[k] = el.checked; save();
+  }));
+  document.getElementById('taskEvents').onchange = (e) => { prefs.task_events = taskEventsOn = e.target.checked; save(); };
 
   document.getElementById('enable')?.addEventListener('click', async () => {
     const res = await Notification.requestPermission();
     await logEvent('notifications_permission', { result: res });
-    toast(res === 'granted' ? 'Notifications on' : 'Not allowed');
+    const ok = res === 'granted' && (await ensurePushSubscription());
+    toast(res !== 'granted' ? 'Not allowed' : ok ? 'Notifications on' : 'Allowed, but this phone could not be registered. Reopen the app.');
     renderSettings();
   });
   document.getElementById('test')?.addEventListener('click', async () => {
     const reg = await navigator.serviceWorker.ready;
     await reg.showNotification('Coach', { body: 'Test notification. If you can read this, reminders will reach you.', icon: 'icons/icon-192.png', tag: 'test' });
   });
-  document.querySelectorAll('[data-pref]').forEach((el) => (el.onchange = async () => {
-    prefs[el.dataset.pref] = el.checked;
-    await sb.from('notification_prefs').upsert({ user_id: user.id, prefs, updated_at: new Date().toISOString() });
-    toast('Saved');
-  }));
   document.getElementById('signout').onclick = () => sb.auth.signOut();
 }
 
@@ -325,12 +437,20 @@ function show(t) {
   $tabs.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.tab === t));
   ({ today: renderToday, report: renderReport, settings: renderSettings })[t]().catch((e) => { console.error(e); toast('Something went wrong. Pull to refresh.'); });
 }
-$tabs.querySelectorAll('button').forEach((b) => (b.onclick = () => show(b.dataset.tab)));
+$tabs.querySelectorAll('button').forEach((b) => (b.onclick = () => { history.replaceState(null, '', `#${b.dataset.tab}`); show(b.dataset.tab); }));
+const tabFromHash = () => { const h = location.hash.slice(1); return ['today', 'report', 'settings'].includes(h) ? h : 'today'; };
+navigator.serviceWorker?.addEventListener('message', (e) => {
+  if (e.data?.type === 'open' && user) { const h = new URL(e.data.url).hash.slice(1); if (h) { history.replaceState(null, '', `#${h}`); show(tabFromHash()); } }
+});
 document.addEventListener('visibilitychange', () => { if (!document.hidden && user && tab === 'today') renderToday(); });
 
 sb.auth.onAuthStateChange((_event, session) => {
   const next = session?.user ?? null;
   if (next?.id === user?.id && next) return;
   user = next;
-  if (user) { $tabs.hidden = false; show('today'); } else { clearInterval(tick); renderAuth(); }
+  if (user) {
+    $tabs.hidden = false; show(tabFromHash());
+    ensurePushSubscription();
+    loadPrefs().then((p) => { taskEventsOn = p.task_events !== false; }).catch(() => {});
+  } else { clearInterval(tick); renderAuth(); }
 });

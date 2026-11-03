@@ -1,5 +1,5 @@
 // Service worker: offline app shell + notifications.
-const CACHE = 'coach-v1';
+const CACHE = 'coach-v3';
 const SHELL = ['./', './index.html', './app.js', './config.js', './styles.css', './manifest.json', './icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {
@@ -46,10 +46,16 @@ self.addEventListener('push', (e) => {
 
 self.addEventListener('notificationclick', (e) => {
   e.notification.close();
-  const target = (e.notification.data && e.notification.data.url) || './';
+  const target = new URL((e.notification.data && e.notification.data.url) || './', self.registration.scope).href;
   e.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
-      for (const c of list) { if ('focus' in c) return c.focus(); }
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(async (list) => {
+      for (const c of list) {
+        if ('focus' in c) {
+          await c.focus();
+          c.postMessage({ type: 'open', url: target }); // the open app switches tab
+          return;
+        }
+      }
       return self.clients.openWindow(target);
     })
   );
