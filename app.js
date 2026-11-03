@@ -1,7 +1,7 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, FOCUS_START, FOCUS_END, VAPID_PUBLIC_KEY } from './config.js';
 
-const VERSION = '0.5.1';
+const VERSION = '0.5.2';
 const $app = document.getElementById('app');
 const $tabs = document.getElementById('tabs');
 const $toast = document.getElementById('toast');
@@ -13,7 +13,8 @@ const RUNNING = [
   ['Focus heads-up alert', '8:45 AM'],
   ['Focus start alert', '9:00 AM'],
   ['Noon check-in', '12:00 PM. Submitting it stops the timer.'],
-  ['Timer still running alert', '12:15 PM, if you forgot to check in'],
+  ['Timer still running alerts', '12:15 PM and 12:30 PM'],
+  ['Timer stops automatically', '1:00 PM, if still running. Counts against Execution.'],
   ['Night log reminder', '9:45 PM'],
 ];
 const DEFAULT_PREFS = {
@@ -144,7 +145,7 @@ async function renderToday() {
   else if (weekend) focusLabel = 'Weekend: no focus block';
   else if (now < start) focusLabel = `Focus block starts at ${fmtTime(start)}`;
   else if (now < end) focusLabel = sessions.length ? 'Paused. The block is still on.' : 'You should be in your focus block now';
-  else focusLabel = 'Focus block over';
+  else focusLabel = sessions.some((x) => x.auto_stopped) ? 'Stopped automatically at 1:00 PM' : 'Focus block over';
 
   $app.innerHTML = `
     <h1>${now.toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' })}</h1>
