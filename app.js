@@ -1,7 +1,7 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, FOCUS_START, FOCUS_END, VAPID_PUBLIC_KEY } from './config.js';
 
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
 const $app = document.getElementById('app');
 const $tabs = document.getElementById('tabs');
 const $toast = document.getElementById('toast');
@@ -157,8 +157,11 @@ async function renderToday() {
     </section>
 
     <h2>Today's tasks</h2>
-    <div id="tasks">${active.length ? active.map(taskHtml).join('') : `<div class="card muted small">Claude sets your tasks each morning. Until the reviewer is built, they arrive from our chat.</div>`}</div>
+    <div id="tasks">${active.length ? active.map(taskHtml).join('') : `<div class="card muted small">Claude sets your tasks each morning once your Claude account is linked. Until then, add your own.</div>`}</div>
     <button class="ghost block small" id="addTask">Add a task</button>
+
+    ${now.getDay() === 0 ? `<h2>This week</h2><div class="card row"><div class="grow"><strong>Weekly outcome</strong><div class="small muted">What shipped this week, and was it used? Counts for 25% of your weekly score.</div></div>
+      ${has('weekly_outcome') ? '<span class="badge">Done</span>' : '<button class="small primary" id="outcomeBtn">Write</button>'}</div>` : ''}
 
     <h2>Check-ins</h2>
     <div class="card stack">
@@ -198,6 +201,7 @@ async function renderToday() {
   document.getElementById('addTask').onclick = () => addTaskDialog(active.length);
   document.getElementById('noonBtn')?.addEventListener('click', () => noonDialog(active));
   document.getElementById('nightBtn')?.addEventListener('click', nightDialog);
+  document.getElementById('outcomeBtn')?.addEventListener('click', outcomeDialog);
 }
 
 function taskHtml(t) {
@@ -272,6 +276,18 @@ function noonDialog(tasks) {
   });
 }
 
+function outcomeDialog() {
+  openDialog(`<h2 style="margin-top:0">Weekly outcome</h2>
+    <p class="small muted">Be specific. The reviewer checks this against your sessions.</p>
+    <div><label>What shipped this week? (designs, docs, prototypes, workflows)</label><textarea name="shipped" required></textarea></div>
+    <div><label>Was it used, and by whom?</label><textarea name="used" required></textarea></div>`,
+  async (f) => {
+    const { error } = await sb.from('checkins').insert({ day: today(), kind: 'weekly_outcome', content: f });
+    if (error) return error.message;
+    await logEvent('weekly_outcome');
+  });
+}
+
 function nightDialog() {
   openDialog(`<h2 style="margin-top:0">Night log</h2>
     <div><label>What else did you do today that matters? (work, AI, learning)</label><textarea name="log" required></textarea></div>
@@ -285,40 +301,73 @@ function nightDialog() {
 }
 
 // ---------- report ----------
+let reportIndex = 0;
+const KIND_TITLE = { daily: 'Daily report', weekly: 'Weekly report', monthly: 'Monthly report' };
+const DIM_NAMES = { execution: 'Execution', ai_work: 'AI at work', prompting: 'Prompting', independence: 'Independence' };
+// Text for read-aloud: markdown removed, symbols spoken naturally.
+const spoken = (md) => md.replace(/\*\*/g, '').replace(/^>\s?/gm, '').replace(/·/g, ',').replace(/→/g, 'then').replace(/\n+/g, '. ').replace(/\.\s*\./g, '.');
+
 async function renderReport() {
   clearInterval(tick);
-  const { data } = await sb.from('reports').select('*').order('day', { ascending: false }).order('created_at', { ascending: false }).limit(1);
-  const r = data?.[0];
-  if (!r) {
+  speechSynthesis?.cancel?.();
+  const { data } = await sb.from('reports').select('*').order('day', { ascending: false }).order('created_at', { ascending: false }).limit(14);
+  const list = data || [];
+  if (!list.length) {
     $app.innerHTML = `<h1>Report</h1><div class="card"><p style="margin:0"><strong>No report yet.</strong></p>
-      <p class="small muted">Your first scored report arrives once the morning reviewer is built in Phase 2. Until then, every check-in you log becomes evidence for it.</p></div>`;
+      <p class="small muted">Reports start once your Claude account is linked (Settings, Connections). Until then, every check-in you log becomes evidence for the first one.</p></div>`;
     return;
   }
+  reportIndex = Math.min(reportIndex, list.length - 1);
+  const r = list[reportIndex];
   const s = r.scores || {};
-  let audio = '', pdf = '';
-  if (r.audio_path) { const { data: u } = await sb.storage.from('reports').createSignedUrl(r.audio_path, 3600); if (u) audio = `<audio controls src="${u.signedUrl}" style="width:100%"></audio>`; }
+  const score = s.overall ?? s.weekly_score;
+  let pdf = '';
   if (r.pdf_path) { const { data: u } = await sb.storage.from('reports').createSignedUrl(r.pdf_path, 3600); if (u) pdf = `<a class="btn" href="${u.signedUrl}" target="_blank" rel="noopener">Open PDF</a>`; }
-  $app.innerHTML = `<h1>${r.kind === 'daily' ? 'Daily' : r.kind === 'weekly' ? 'Weekly' : 'Monthly'} report</h1>
-    <p class="muted" style="margin-top:0">${new Date(r.day).toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' })}</p>
-    <div class="card"><div class="row"><div class="score">${esc(s.overall ?? '–')}</div><div class="grow"><strong>${esc(s.grade ?? '')}</strong></div></div></div>
-    ${audio}${pdf ? `<div style="margin:10px 0">${pdf}</div>` : ''}
-    <div class="card report">${mdToHtml(r.body_md)}</div>`;
+  const dims = s.dimensions ? Object.entries(DIM_NAMES).filter(([k]) => s.dimensions[k]).map(([k, n]) =>
+    `<div class="dim"><span>${esc(n)}</span><div class="bar"><i style="width:${Math.max(0, Math.min(100, Number(s.dimensions[k].score) || 0))}%"></i></div><b>${esc(s.dimensions[k].score)}</b></div>`).join('') : '';
+  $app.innerHTML = `<h1>${esc(KIND_TITLE[r.kind] || 'Report')}</h1>
+    <p class="muted" style="margin-top:0">${new Date(r.day + 'T00:00:00').toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' })}${s.provisional ? ' · provisional' : ''}</p>
+    <div class="card"><div class="row"><div class="score">${esc(score ?? '–')}</div><div class="grow"><strong>${esc(s.grade ?? '')}</strong>${s.verdict ? `<div class="small muted">${esc(s.verdict)}</div>` : ''}</div></div>
+      ${dims ? `<div class="dims">${dims}</div>` : ''}</div>
+    <div class="row" style="gap:8px;margin:10px 0"><button class="primary" id="listen">▶ Listen</button>${pdf}</div>
+    <div class="card report">${mdToHtml(r.body_md)}</div>
+    ${list.length > 1 ? `<h2>Earlier reports</h2><div class="card">${list.map((x, i) => `<button class="hist ${i === reportIndex ? 'active' : ''}" data-i="${i}"><span>${esc(KIND_TITLE[x.kind] || x.kind)} · ${new Date(x.day + 'T00:00:00').toLocaleDateString([], { day: 'numeric', month: 'short' })}</span><b>${esc((x.scores || {}).overall ?? (x.scores || {}).weekly_score ?? '')}</b></button>`).join('')}</div>` : ''}`;
+  const btn = document.getElementById('listen');
+  btn.onclick = () => {
+    if (!('speechSynthesis' in window)) return toast('Read-aloud is not available on this device');
+    if (speechSynthesis.speaking) { speechSynthesis.cancel(); btn.textContent = '▶ Listen'; return; }
+    const u = new SpeechSynthesisUtterance(spoken(r.body_md));
+    const v = speechSynthesis.getVoices().find((x) => /en[-_](IN|GB|US)/i.test(x.lang));
+    if (v) u.voice = v;
+    u.rate = 1.0;
+    u.onend = () => (btn.textContent = '▶ Listen');
+    speechSynthesis.speak(u); btn.textContent = '■ Stop';
+    logEvent('report_listened', { report: r.id });
+  };
+  document.querySelectorAll('[data-i]').forEach((el) => (el.onclick = () => { reportIndex = Number(el.dataset.i); renderReport(); }));
+  logEvent('report_opened', { report: r.id });
 }
 
-// Minimal markdown: headings, bold, quotes, lists, paragraphs
+// Minimal markdown: bold, quote lines, lists, paragraphs
 function mdToHtml(md) {
-  return esc(md).split(/\n{2,}/).map((block) => {
-    const b = block.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    if (/^### /.test(b)) return `<h3>${b.slice(4)}</h3>`;
-    if (/^## /.test(b)) return `<h3>${b.slice(3)}</h3>`;
-    if (/^&gt; /.test(b)) return `<blockquote>${b.replace(/^&gt; /gm, '')}</blockquote>`;
-    if (/^(\d+\.|-) /.test(b)) return `<ul>${b.split('\n').map((l) => `<li>${l.replace(/^(\d+\.|-) /, '')}</li>`).join('')}</ul>`;
-    return `<p>${b.replace(/\n/g, '<br>')}</p>`;
+  return esc(md || '').split(/\n{2,}/).map((block) => {
+    const lines = block.split('\n').map((l) => l.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>'));
+    if (lines.every((l) => /^(\d+\.|-) /.test(l))) return `<ul>${lines.map((l) => `<li>${l.replace(/^(\d+\.|-) /, '')}</li>`).join('')}</ul>`;
+    let html = '', para = [];
+    const flush = () => { if (para.length) html += `<p>${para.join('<br>')}</p>`; para = []; };
+    for (const l of lines) {
+      if (/^&gt;\s?/.test(l)) { flush(); html += `<blockquote>${l.replace(/^&gt;\s?/, '')}</blockquote>`; }
+      else para.push(l);
+    }
+    flush();
+    return html;
   }).join('');
 }
 
 // ---------- settings ----------
 const APP_URL = 'https://amanrai33821.github.io/coach/';
+const API_URL = 'https://ibgdvsdahuiclvkkqbtx.supabase.co/functions/v1/smooth-responder';
+const API_HOST = new URL(API_URL).host;
 const INSTALL_URL = APP_URL + 'mac/install.sh';
 const when = (iso) => new Date(iso).toLocaleString([], { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
 
@@ -340,6 +389,95 @@ async function copyText(text, btn) {
     const t = document.createElement('textarea'); t.value = text; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove();
   }
   if (btn) { const old = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => (btn.textContent = old), 1800); }
+}
+
+// The message the user pastes into a new Claude chat. That chat becomes the reviewer.
+function reviewerSetupMessage(code, account) {
+  const run = [
+    'COACH REVIEW RUN',
+    `Endpoint: ${API_URL}`,
+    `Pairing code: ${code}`,
+    '1. Schedule the next run first: call send_later with at = tomorrow at 06:30 [Asia/Kolkata], name "Coach morning review", and this same message, word for word. Keep the scheduled task id it returns.',
+    '2. Fetch your instructions: POST to the endpoint with headers x-coach-token (the pairing code) and x-coach-action: instructions. If the answer is 401 and says "disconnected", delete the run you just scheduled (delete_trigger with that id), say "This reviewer has been disconnected." and stop.',
+    '3. Follow those instructions exactly.',
+  ].join('\n');
+  return `COACH REVIEWER SETUP
+
+This chat will be the morning reviewer for my Coach app. Please keep it only for that.
+
+Endpoint: ${API_URL}
+Pairing code: ${code}
+Claude account: ${account}
+
+Do these steps now, in order, using bash and curl:
+
+1. Check you can reach Coach:
+curl -sS -X POST "${API_URL}" -H "x-coach-token: ${code}" -H "x-coach-action: hello" -H "Content-Type: application/json" -d '{"account":"${account}"}'
+If this fails with a network or proxy error (for example "CONNECT tunnel failed, response 403"), stop and tell me exactly: "Add ${API_HOST} in Claude Settings > Capabilities (allowed domains), then reply done." When I reply done, try again.
+
+2. Check you have the past-chat tools (recent_chats, conversation_search) and the send_later tool. Load them with tool search if they are deferred. If any is missing, tell me which, and stop.
+
+3. Schedule the daily run: call send_later with at = tomorrow at 06:30 [Asia/Kolkata], name "Coach morning review", and as the message the RUN MESSAGE below, word for word.
+
+4. Do a first run now: follow steps 2 and 3 of the RUN MESSAGE yourself (skip its step 1, you just scheduled it).
+
+5. Tell me in three lines: linked, the first report's score, and the next run time.
+
+RUN MESSAGE:
+${run}`;
+}
+
+function linkClaudeSheet(code, connId, account) {
+  const msg = reviewerSetupMessage(code, account);
+  const dlg = document.createElement('dialog');
+  dlg.innerHTML = `<div class="stack">
+    <h2 style="margin-top:0">Link your Claude account</h2>
+    <p class="small muted">Sets up the morning reviewer on <b>${esc(account)}</b>. Takes about 3 minutes. Do these signed in to that account, on any device.</p>
+    <ol class="steps">
+      <li><strong>Allow Claude to reach Coach.</strong>
+        <div class="small muted">In Claude, open <b>Settings → Capabilities</b> and add this to the allowed domains:</div>
+        <div class="code">${esc(API_HOST)}</div>
+        <div class="row" style="gap:8px"><button class="small" id="copyHost">Copy</button><a class="btn small" href="https://claude.ai/settings/capabilities" target="_blank" rel="noopener">Open Claude settings</a></div>
+        <div class="small muted">Once per Claude account. Already done on this account? Skip it.</div></li>
+      <li><strong>Start a new chat in Claude</strong> on that account. This chat becomes your reviewer; leave it just for that.</li>
+      <li><strong>Copy the setup message and send it in that chat.</strong>
+        <div class="code small-code" id="setupMsg">${esc(msg)}</div>
+        <button class="small" id="copyMsg">Copy setup message</button></li>
+      <li><strong>Waiting for the reviewer to check in…</strong><div class="small" id="st1"><span class="muted">Ticks itself off when it reaches Coach.</span></div></li>
+      <li><strong>Waiting for the first report…</strong><div class="small" id="st2"><span class="muted">The reviewer scores your latest workday as a test (a few minutes).</span></div></li>
+    </ol>
+    <p class="small muted" style="margin:0">This code is shown only once. If you lose it, close this and tap Link again.</p>
+    <button class="primary block" id="sheetDone">Close</button>
+  </div>`;
+  document.body.appendChild(dlg);
+  const items = dlg.querySelectorAll('.steps li');
+  dlg.querySelector('#copyHost').onclick = (e) => copyText(API_HOST, e.currentTarget);
+  dlg.querySelector('#copyMsg').onclick = (e) => copyText(msg, e.currentTarget);
+  let seen = false;
+  let timer = setInterval(async () => {
+    if (!seen) {
+      const { data } = await sb.from('connections').select('last_seen_at').eq('id', connId).maybeSingle();
+      if (data?.last_seen_at) {
+        seen = true;
+        items[0].classList.add('done'); items[3].classList.add('done');
+        items[3].querySelector('strong').textContent = 'The reviewer reached Coach.';
+        dlg.querySelector('#st1').innerHTML = `<span style="color:var(--good)">✓ Checked in at ${esc(fmtTime(data.last_seen_at))}.</span>`;
+        logEvent('claude_linked');
+      }
+    } else {
+      const { data } = await sb.from('reports').select('day, scores').eq('connection_id', connId).limit(1);
+      if (data?.length) {
+        clearInterval(timer); timer = null;
+        items[4].classList.add('done');
+        items[4].querySelector('strong').textContent = 'First report is in.';
+        dlg.querySelector('#st2').innerHTML = `<span style="color:var(--good)">✓ ${esc((data[0].scores || {}).overall ?? '')} ${esc((data[0].scores || {}).grade ?? '')}. Open the Report tab to read it.</span>`;
+        dlg.querySelector('#sheetDone').textContent = 'Done';
+      }
+    }
+  }, 4000);
+  dlg.querySelector('#sheetDone').onclick = () => dlg.close();
+  dlg.addEventListener('close', () => { if (timer) clearInterval(timer); dlg.remove(); renderSettings(); });
+  dlg.showModal();
 }
 
 // A guided sheet: numbered steps, Copy buttons, and a last step that ticks itself off.
@@ -386,6 +524,19 @@ async function renderSettings() {
   clearInterval(tick);
   const [prefs, conns] = await Promise.all([loadPrefs(), loadConnections()]);
   const mac = conns.mac;
+  const cl = conns.claude;
+  let clText, clBtn, clDot;
+  if (cl?.last_seen_at) {
+    const { data: lr } = await sb.from('reports').select('day, created_at').eq('connection_id', cl.id).order('created_at', { ascending: false }).limit(1);
+    clText = `Linked · ${cl.label || 'Claude account'} · last run ${when(cl.last_seen_at)}${lr?.length ? ` · last report ${new Date(lr[0].day + 'T00:00:00').toLocaleDateString([], { day: 'numeric', month: 'short' })}` : ''}`;
+    clBtn = ''; clDot = 'on';
+  } else if (cl) {
+    clText = `Setup not finished on ${cl.label || 'your account'}: the reviewer has not checked in yet.`;
+    clBtn = '<button class="small primary" id="clLink">Link</button>'; clDot = 'wait';
+  } else {
+    clText = 'Not linked. Needed for your chats and the morning report.';
+    clBtn = '<button class="small primary" id="clLink">Link</button>'; clDot = 'off';
+  }
   let macText, macBtn, macDot;
   if (mac?.last_seen_at) {
     const waiting = Number(mac.meta?.queued || 0);
@@ -417,9 +568,9 @@ async function renderSettings() {
     <div class="card stack">
       <div class="row"><span class="dot ${macDot}" aria-hidden="true"></span>
         <div class="grow"><strong>Mac</strong> <span class="small muted">· Claude Code</span><div class="small muted">${esc(macText)}</div></div>${macBtn}</div>
-      <div class="row"><span class="dot off" aria-hidden="true"></span>
-        <div class="grow"><strong>Claude account</strong> <span class="small muted">· chats and the morning reviewer</span><div class="small muted">Linking opens once the reviewer is built (next step).</div></div>
-        <button class="small" disabled>Link</button></div>
+      <div class="row"><span class="dot ${clDot}" aria-hidden="true"></span>
+        <div class="grow"><strong>Claude account</strong> <span class="small muted">· chats and the morning reviewer</span><div class="small muted">${esc(clText)}</div></div>${clBtn}</div>
+      ${cl?.last_seen_at ? '<div class="conn-actions"><button class="small ghost" id="clSwitch">Switch account</button><button class="small ghost" id="clDisconnect">Disconnect</button></div>' : ''}
     </div>
     <p class="small muted">Linked separately, each with its own private pairing code. Disconnect cuts one off instantly.</p>
 
@@ -466,6 +617,32 @@ async function renderSettings() {
     const { data, error } = await sb.from('connections').insert({ kind: 'mac', token_hash }).select('id').single();
     if (error) { toast(error.message); return renderSettings(); }
     linkMacSheet(code, data.id);
+  });
+  const startClaudeLink = async (preset = '') => {
+    openDialog(`<h2 style="margin-top:0">Which Claude account?</h2>
+      <p class="small muted">The email you sign in to Claude with. The reviewer reads this account's chats.</p>
+      <div><label>Email</label><input name="account" type="email" value="${esc(preset)}" required></div>`,
+    async (f) => {
+      const account = f.account.trim();
+      if (cl) await sb.from('connections').update({ revoked_at: new Date().toISOString() }).eq('id', cl.id);
+      const { code, token_hash } = await newPairingCode('claude');
+      const { data, error } = await sb.from('connections').insert({ kind: 'claude', label: account, token_hash }).select('id').single();
+      if (error) return error.message;
+      await logEvent('claude_link_started', { replaced: !!cl });
+      setTimeout(() => linkClaudeSheet(code, data.id, account), 50);
+    }, () => {});
+  };
+  document.getElementById('clLink')?.addEventListener('click', () => startClaudeLink(cl?.label || ''));
+  document.getElementById('clSwitch')?.addEventListener('click', () => {
+    if (!confirm(`Switch away from ${cl.label || 'this account'}? Its reviewer is cut off immediately and stops on its next run. Your history stays.`)) return;
+    startClaudeLink('');
+  });
+  document.getElementById('clDisconnect')?.addEventListener('click', async () => {
+    if (!confirm('Disconnect the Claude account? No more morning reports until you link one again. Your history stays.')) return;
+    await sb.from('connections').update({ revoked_at: new Date().toISOString() }).eq('id', cl.id);
+    await logEvent('claude_disconnected');
+    toast('Disconnected. The reviewer stops on its next run.');
+    renderSettings();
   });
   document.getElementById('macDisconnect')?.addEventListener('click', async () => {
     if (!confirm('Disconnect your Mac? Coach stops accepting its uploads immediately, and your Claude Code use is no longer scored.')) return;
