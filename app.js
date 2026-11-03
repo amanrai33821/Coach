@@ -1,7 +1,7 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, FOCUS_START, FOCUS_END, VAPID_PUBLIC_KEY } from './config.js';
 
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 const $app = document.getElementById('app');
 const $tabs = document.getElementById('tabs');
 const $toast = document.getElementById('toast');
@@ -318,21 +318,86 @@ function mdToHtml(md) {
 }
 
 // ---------- settings ----------
-async function lastSeen(source) {
-  const { data } = await sb.from('events').select('occurred_at').eq('source', source).order('occurred_at', { ascending: false }).limit(1);
-  return data?.[0]?.occurred_at || null;
+const APP_URL = 'https://amanrai33821.github.io/coach/';
+const INSTALL_URL = APP_URL + 'mac/install.sh';
+const when = (iso) => new Date(iso).toLocaleString([], { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+
+// A pairing code is shown once; the database keeps only its SHA-256 fingerprint.
+async function newPairingCode(kind) {
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  const code = `coach_${kind}_` + btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(code));
+  const token_hash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  return { code, token_hash };
 }
-const seenText = (iso, notYet) => iso
-  ? `Connected · last activity ${new Date(iso).toLocaleString([], { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}`
-  : notYet;
+async function loadConnections() {
+  const { data } = await sb.from('connections').select('*').is('revoked_at', null).order('created_at', { ascending: false });
+  const live = data || [];
+  return { mac: live.find((c) => c.kind === 'mac') || null, claude: live.find((c) => c.kind === 'claude') || null };
+}
+async function copyText(text, btn) {
+  try { await navigator.clipboard.writeText(text); } catch {
+    const t = document.createElement('textarea'); t.value = text; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove();
+  }
+  if (btn) { const old = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => (btn.textContent = old), 1800); }
+}
+
+// A guided sheet: numbered steps, Copy buttons, and a last step that ticks itself off.
+function linkMacSheet(code, connId) {
+  const cmd = `curl -fsSL ${INSTALL_URL} | bash -s -- ${code}`;
+  const dlg = document.createElement('dialog');
+  dlg.innerHTML = `<div class="stack">
+    <h2 style="margin-top:0">Link your Mac</h2>
+    <p class="small muted">Sends your Claude Code activity to Coach. Takes about a minute. Do these on the Mac where you use Claude Code.</p>
+    <ol class="steps">
+      <li><strong>Open Terminal.</strong><div class="small muted">Press Command + Space, type <b>Terminal</b>, press Return.</div></li>
+      <li><strong>Copy this command.</strong>
+        <div class="code" id="cmd">${esc(cmd)}</div>
+        <button class="small" id="copyCmd">Copy</button>
+        <div class="small muted">On your iPhone? With the same Apple ID, Copy here and paste on your Mac (Universal Clipboard). Or open <b>${esc(APP_URL)}</b> on your Mac, sign in, and use this screen there.</div></li>
+      <li><strong>Paste it into Terminal and press Return.</strong><div class="small muted">It prints a few ticks and ends with "Done". It changes nothing except adding Coach to Claude Code, and backs up your settings first.</div></li>
+      <li><strong>Waiting for your Mac to check in…</strong><div class="small" id="macStatus"><span class="muted">This ticks itself off when your Mac connects.</span></div></li>
+    </ol>
+    <p class="small muted" style="margin:0">This code is shown only once. If you lose it, close this and tap Link Mac again.</p>
+    <button class="primary block" id="sheetDone">Close</button>
+  </div>`;
+  document.body.appendChild(dlg);
+  const status = dlg.querySelector('#macStatus');
+  const last = dlg.querySelectorAll('.steps li')[3];
+  dlg.querySelector('#copyCmd').onclick = (e) => copyText(cmd, e.currentTarget);
+  let timer = setInterval(async () => {
+    const { data } = await sb.from('connections').select('last_seen_at, meta').eq('id', connId).maybeSingle();
+    if (data?.last_seen_at) {
+      clearInterval(timer); timer = null;
+      last.classList.add('done');
+      last.querySelector('strong').textContent = 'Your Mac is linked.';
+      status.innerHTML = `<span style="color:var(--good)">✓ ${esc(data.meta?.device || 'Mac')} checked in at ${esc(fmtTime(data.last_seen_at))}.</span>`;
+      dlg.querySelector('#sheetDone').textContent = 'Done';
+      logEvent('mac_linked');
+    }
+  }, 3000);
+  const close = () => { if (timer) clearInterval(timer); dlg.close(); };
+  dlg.querySelector('#sheetDone').onclick = close;
+  dlg.addEventListener('close', () => { if (timer) clearInterval(timer); dlg.remove(); renderSettings(); });
+  dlg.showModal();
+}
 
 async function renderSettings() {
   clearInterval(tick);
-  const [prefs, ccSeen, lastReport] = await Promise.all([
-    loadPrefs(),
-    lastSeen('claude_code'),
-    sb.from('reports').select('created_at').order('created_at', { ascending: false }).limit(1).then((r) => r.data?.[0]?.created_at || null),
-  ]);
+  const [prefs, conns] = await Promise.all([loadPrefs(), loadConnections()]);
+  const mac = conns.mac;
+  let macText, macBtn, macDot;
+  if (mac?.last_seen_at) {
+    const waiting = Number(mac.meta?.queued || 0);
+    macText = `Linked · ${mac.meta?.device || 'Mac'} · last seen ${when(mac.last_seen_at)}${waiting ? ` · ${waiting} upload(s) waiting` : ''}`;
+    macBtn = '<button class="small ghost" id="macDisconnect">Disconnect</button>'; macDot = 'on';
+  } else if (mac) {
+    macText = 'Setup not finished: your Mac has not checked in yet.';
+    macBtn = '<button class="small primary" id="macLink">Link Mac</button>'; macDot = 'wait';
+  } else {
+    macText = 'Not linked. Needed to score your Claude Code use.';
+    macBtn = '<button class="small primary" id="macLink">Link Mac</button>'; macDot = 'off';
+  }
   const name = user.user_metadata?.full_name || '';
   const initials = (name || user.email).split(/[\s@.]+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
   const perm = 'Notification' in window ? Notification.permission : 'unsupported';
@@ -348,14 +413,15 @@ async function renderSettings() {
       <button class="small ghost" id="editName">Edit</button>
     </div>
 
-    <h2>Claude account</h2>
+    <h2>Connections</h2>
     <div class="card stack">
-      <div class="row"><div class="grow"><strong>Account</strong><div class="small muted">${prefs.claude_account ? esc(prefs.claude_account) : 'Not set'}</div></div>
-        <button class="small ghost" id="editClaude">${prefs.claude_account ? 'Change' : 'Set'}</button></div>
-      <div><strong>Claude Code on your Mac</strong><div class="small muted">${esc(seenText(ccSeen, 'Not connected yet. Set up in Phase 2.'))}</div></div>
-      <div><strong>Morning reviewer</strong><div class="small muted">${esc(lastReport ? `Connected · last report ${new Date(lastReport).toLocaleString([], { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}` : 'Not connected yet. Set up in Phase 2.')}</div></div>
-      <p class="small muted" style="margin:0">Switching accounts: change it here, then recreate the morning reviewer on the new account (about 15 minutes, guided). Claude Code tracking keeps working whichever account is signed in on your Mac.</p>
+      <div class="row"><span class="dot ${macDot}" aria-hidden="true"></span>
+        <div class="grow"><strong>Mac</strong> <span class="small muted">· Claude Code</span><div class="small muted">${esc(macText)}</div></div>${macBtn}</div>
+      <div class="row"><span class="dot off" aria-hidden="true"></span>
+        <div class="grow"><strong>Claude account</strong> <span class="small muted">· chats and the morning reviewer</span><div class="small muted">Linking opens once the reviewer is built (next step).</div></div>
+        <button class="small" disabled>Link</button></div>
     </div>
+    <p class="small muted">Linked separately, each with its own private pairing code. Disconnect cuts one off instantly.</p>
 
     <h2>Running parameters</h2>
     <div class="card">${RUNNING.map(([k, v]) => `<div class="switch"><span>${esc(k)}</span><span class="small muted" style="text-align:right;max-width:58%">${esc(v)}</span></div>`).join('')}</div>
@@ -368,7 +434,7 @@ async function renderSettings() {
       <label class="switch"><span>Weekly report <span class="small muted">· Sundays</span></span><input type="checkbox" data-report="weekly" ${r.weekly ? 'checked' : ''}></label>
       <label class="switch"><span>Monthly report <span class="small muted">· 1st of the month</span></span><input type="checkbox" data-report="monthly" ${r.monthly ? 'checked' : ''}></label>
     </div>
-    <p class="small muted">Delivery between 7:00 and 10:00 AM; the reviewer runs at 6:30. Reports start in Phase 2.</p>
+    <p class="small muted">Delivery between 7:00 and 10:00 AM; the reviewer runs at 6:30. Reports start once the Claude account is linked.</p>
 
     <h2>Notifications</h2>
     <div class="card stack">
@@ -393,17 +459,30 @@ async function renderSettings() {
     user = data.user;
   }, renderSettings);
 
-  document.getElementById('editClaude').onclick = () => openDialog(`<h2 style="margin-top:0">Claude account</h2>
-    <p class="small muted">The email you sign in to Claude with. The morning reviewer runs on this account.</p>
-    <div><label>Email</label><input name="claude_account" type="email" value="${esc(prefs.claude_account)}" required></div>`,
-  async (f) => {
-    const changed = prefs.claude_account && prefs.claude_account !== f.claude_account.trim();
-    prefs.claude_account = f.claude_account.trim();
-    const { error } = await savePrefs(prefs);
-    if (error) return error.message;
-    await logEvent('claude_account_set', { changed });
-    if (changed) toast('Saved. Recreate the morning reviewer on the new account.');
-  }, renderSettings);
+  document.getElementById('macLink')?.addEventListener('click', async (e) => {
+    e.currentTarget.disabled = true;
+    if (mac) await sb.from('connections').update({ revoked_at: new Date().toISOString() }).eq('id', mac.id); // unfinished attempt
+    const { code, token_hash } = await newPairingCode('mac');
+    const { data, error } = await sb.from('connections').insert({ kind: 'mac', token_hash }).select('id').single();
+    if (error) { toast(error.message); return renderSettings(); }
+    linkMacSheet(code, data.id);
+  });
+  document.getElementById('macDisconnect')?.addEventListener('click', async () => {
+    if (!confirm('Disconnect your Mac? Coach stops accepting its uploads immediately, and your Claude Code use is no longer scored.')) return;
+    await sb.from('connections').update({ revoked_at: new Date().toISOString() }).eq('id', mac.id);
+    await logEvent('mac_disconnected');
+    const dlg = document.createElement('dialog');
+    const un = `curl -fsSL ${INSTALL_URL} | bash -s -- --uninstall`;
+    dlg.innerHTML = `<div class="stack"><h2 style="margin-top:0">Mac disconnected</h2>
+      <p class="small">Coach no longer accepts anything from that Mac. To also remove the Coach files from it, paste this into its Terminal:</p>
+      <div class="code">${esc(un)}</div><button class="small" id="copyUn">Copy</button>
+      <button class="primary block" id="unDone">Done</button></div>`;
+    document.body.appendChild(dlg);
+    dlg.querySelector('#copyUn').onclick = (ev) => copyText(un, ev.currentTarget);
+    dlg.querySelector('#unDone').onclick = () => dlg.close();
+    dlg.addEventListener('close', () => { dlg.remove(); renderSettings(); });
+    dlg.showModal();
+  });
 
   document.getElementById('reportTime').onchange = (e) => {
     const v = e.target.value;

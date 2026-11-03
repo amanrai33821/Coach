@@ -1,5 +1,5 @@
 // Service worker: offline app shell + notifications.
-const CACHE = 'coach-v3';
+const CACHE = 'coach-v4';
 const SHELL = ['./', './index.html', './app.js', './config.js', './styles.css', './manifest.json', './icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {
