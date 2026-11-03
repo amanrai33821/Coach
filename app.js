@@ -1,7 +1,7 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, FOCUS_START, FOCUS_END, VAPID_PUBLIC_KEY } from './config.js';
 
-const VERSION = '0.5.2';
+const VERSION = '0.5.3';
 const $app = document.getElementById('app');
 const $tabs = document.getElementById('tabs');
 const $toast = document.getElementById('toast');
@@ -15,6 +15,7 @@ const RUNNING = [
   ['Noon check-in', '12:00 PM. Submitting it stops the timer.'],
   ['Timer still running alerts', '12:15 PM and 12:30 PM'],
   ['Timer stops automatically', '1:00 PM, if still running. Counts against Execution.'],
+  ['Timer closed', 'After 1:00 PM it cannot be started, until 9:00 next day.'],
   ['Night log reminder', '9:45 PM'],
 ];
 const DEFAULT_PREFS = {
@@ -134,7 +135,8 @@ async function renderToday() {
   const live = sessions.find((s) => !s.ended_at);
   const doneMs = sessions.filter((s) => s.ended_at).reduce((a, s) => a + (new Date(s.ended_at) - new Date(s.started_at)), 0);
   const now = new Date();
-  const start = atTime(FOCUS_START), end = atTime(FOCUS_END);
+  const start = atTime(FOCUS_START), end = atTime(FOCUS_END), cutoff = atTime('13:00');
+  const closed = !live && now >= cutoff;
   const weekend = [0, 6].includes(now.getDay());
   const has = (k) => checkins.some((c) => c.kind === k);
   const active = tasks.filter((t) => t.status !== 'swapped');
@@ -154,7 +156,7 @@ async function renderToday() {
     <section class="card focus ${live ? 'live' : ''}">
       <div class="small muted">${esc(focusLabel)}</div>
       <div class="clock" id="clock">${fmtDur(doneMs + (live ? now - new Date(live.started_at) : 0))}</div>
-      <button class="${live ? 'ghost' : 'primary'}" id="focusBtn">${live ? 'Stop' : 'Start focus'}</button>
+      ${closed ? '<button class="ghost" id="focusBtn" disabled>Closed until 9:00 tomorrow</button>' : `<button class="${live ? 'ghost' : 'primary'}" id="focusBtn">${live ? 'Stop' : 'Start focus'}</button>`}
     </section>
 
     <h2>Today's tasks</h2>
@@ -183,7 +185,9 @@ async function renderToday() {
       await sb.from('focus_sessions').update({ ended_at: new Date().toISOString() }).eq('id', live.id);
       await logEvent('focus_stop'); toast('Focus stopped'); notifyLocal('Focus stopped.');
     } else {
-      await sb.from('focus_sessions').insert({ day: today() });
+      if (new Date() >= atTime('13:00')) { toast('The timer is closed after 1:00 PM.'); return renderToday(); }
+      const { error } = await sb.from('focus_sessions').insert({ day: today() });
+      if (error) { toast(error.message); return renderToday(); }
       await logEvent('focus_start'); toast('Focus started. Phone down.'); notifyLocal('Focus started. Phone down.');
     }
     renderToday();
