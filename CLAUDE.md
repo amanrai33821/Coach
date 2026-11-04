@@ -14,3 +14,7 @@ Personal accountability app: a home-screen web app (this repo, served by GitHub 
 - `index.html`, `app.js`, `styles.css`, `sw.js`, `manifest.json`, `icons/`: the app. Bump `VERSION` in app.js and `CACHE` in sw.js on every release.
 - `config.js`: public Supabase URL, publishable key and the public push key. Never put secret keys here.
 - `mac/install.sh`: the Claude Code connector (hooks, offline queue, uploader).
+
+## Server
+
+- `server/`: the Supabase Edge Function source, the reviewer instructions and the SQL history. See `server/README.md` for how to deploy. Secrets live only in Supabase.
