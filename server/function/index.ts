@@ -465,19 +465,21 @@ async function saveReport(conn: any, b: any) {
     .select('id').single();
   if (error) return Response.json({ error: error.message }, { status: 500 });
 
-  // Today's tasks, from the daily report, on workdays only
+  // Tasks from the daily report go on the next workday from today: today on a
+  // workday, Monday when the run is on a weekend (Friday's review runs on Saturday).
   let tasksSet = 0;
-  const today = localNow().date;
-  if (b.kind === 'daily' && Array.isArray(b.tasks) && b.tasks.length && isWorkday(today)) {
-    await db.from('tasks').delete().eq('user_id', uid).eq('day', today).eq('source', 'claude').eq('status', 'pending');
+  let taskDay = localNow().date;
+  while (!isWorkday(taskDay)) taskDay = addDays(taskDay, 1);
+  if (b.kind === 'daily' && Array.isArray(b.tasks) && b.tasks.length) {
+    await db.from('tasks').delete().eq('user_id', uid).eq('day', taskDay).eq('source', 'claude').eq('status', 'pending');
     const rows = b.tasks.slice(0, 3).filter((t: any) => t?.title).map((t: any, i: number) => ({
-      user_id: uid, day: today, title: String(t.title).slice(0, 200), done_criteria: t.done_criteria ? String(t.done_criteria).slice(0, 300) : null,
+      user_id: uid, day: taskDay, title: String(t.title).slice(0, 200), done_criteria: t.done_criteria ? String(t.done_criteria).slice(0, 300) : null,
       time_box_min: Number(t.time_box_min) || null, source: 'claude', sort: i,
     }));
     const { error: te } = await db.from('tasks').insert(rows);
     if (te) console.error('tasks', te); else tasksSet = rows.length;
   }
-  return Response.json({ ok: true, report_id: rep.id, pdf_path, tasks_set: tasksSet, tasks_day: tasksSet ? today : null });
+  return Response.json({ ok: true, report_id: rep.id, pdf_path, tasks_set: tasksSet, tasks_day: tasksSet ? taskDay : null });
 }
 
 Deno.serve(async (req) => {

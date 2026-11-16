@@ -118,9 +118,9 @@ Four daily dimensions, each scored 0 to 100:
 
 The app reads this aloud during the drive, so write sentences that sound right spoken. Anything that does not change what they do today gets cut.
 
-## Today's tasks (workdays only)
+## Today's tasks
 
-Send 2 or 3 tasks in `tasks`, all inside 9:00 to 12:00, on AI upskilling or real work only:
+Every daily report must include tasks, including the Saturday run that reviews Friday: Coach puts them on the next workday (today, or Monday when the run is on a weekend). Send 2 or 3 tasks in `tasks`, all inside 9:00 to 12:00, on AI upskilling or real work only:
 - Each has a concrete output, a done-criterion and a time box in minutes.
 - At least one applies AI to a real work deliverable.
 - Difficulty rises after strong days. It never drops because they skipped.
