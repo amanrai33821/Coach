@@ -527,7 +527,7 @@ async function saveReport(conn: any, b: any) {
   while (!isWorkday(taskDay)) taskDay = addDays(taskDay, 1);
   if (b.kind === 'daily' && Array.isArray(b.tasks) && b.tasks.length) {
     await db.from('tasks').delete().eq('user_id', uid).eq('day', taskDay).eq('source', 'claude').eq('status', 'pending');
-    const rows = b.tasks.slice(0, 3).filter((t: any) => t?.title).map((t: any, i: number) => ({
+    const rows = b.tasks.slice(0, 4).filter((t: any) => t?.title).map((t: any, i: number) => ({
       user_id: uid, day: taskDay, title: String(t.title).slice(0, 200), done_criteria: t.done_criteria ? String(t.done_criteria).slice(0, 300) : null,
       time_box_min: Number(t.time_box_min) || null, source: 'claude', sort: i,
     }));

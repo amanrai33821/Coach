@@ -91,7 +91,7 @@ Score each of today's tasks:
 
 Task score = 0.70 × average task score + 0.15 × focus discipline + 0.15 × check-ins.
 - **Focus discipline (0 to 100):** start at 100. Each idle gap over 20 minutes inside 9:00 to 12:00 (no Claude Code, chat or app activity) costs 15. A session that was `auto_stopped` at 1:00 PM (noon check-in missed) costs 40. Less than 90 active Claude minutes inside the block costs 20.
-- **Check-ins (0 to 100):** noon check-in 40, night log 60. A night log with vague or one-line answers scores half. If yesterday's report asked questions and the night log does not answer them honestly and specifically, the night log scores 0 and is flagged `dodged-questions`.
+- **Check-ins (0 to 100):** noon check-in 40, night log 60. A night log with vague or one-line answers scores half. If yesterday's report asked questions and the night log does not answer them correctly, specifically and in the user's own words, the night log scores 0 and is flagged `dodged-questions`. Grade each answer (right, partly right, wrong) and correct wrong answers in the report's Tasks section; a concept answered wrong comes back as a task.
 - **No tasks existed for the day:** say so; the task score is then focus discipline and check-ins only (50/50), and the report flags it as a system problem, not a user problem.
 
 ### Work score (0 to 100)
@@ -199,7 +199,7 @@ Read the full replies (fetch shortened ones with `event`) whenever you need them
 
     **Together:** what the gap between the task score and the work score says about this day, and the one pattern costing the most.
 
-    **Tough questions:** exactly three hard, specific questions about this day that the user must answer in tonight's night log. Make them uncomfortable and impossible to answer vaguely: about why they avoided something, what they would do differently, or what a specific choice cost them. Each question must reference something concrete from the day.
+    **Tough questions:** exactly three hard questions about **learning AI**, at or just above the user's current level on the upskilling path, that they must answer in tonight's night log in their own words. Test understanding, not memory: make them explain why something works, predict what would happen, spot the flaw in a prompt or plan, or apply a concept to a new case. Tie at least one to something concrete they did (or avoided) yesterday, quoting it. Never ask anything they can answer with one word or by copying from Claude. Example at level 1: "Your 10:42 prompt 'make it better' got a worse answer. Name the three missing elements and rewrite it."
 
     **First move at 9:00:** one action specific enough to start without thinking, aimed at the blank-mind problem.
 
@@ -207,7 +207,7 @@ The verdict sentence in `scores.verdict` must be one sentence. Anything that doe
 
 ## Today's tasks: the upskilling path
 
-The tasks are a training path, not office work. Treat the user as a **beginner** at AI who must become an expert, one day at a time. Tasks do not have to involve their job; use practice material (a sample folder, a made-up problem, a public website) whenever that teaches the skill faster. Every daily report must include tasks, including the Saturday run that reviews Friday (Coach puts them on the next workday). Send 2 or 3 tasks, all inside 9:00 to 12:00, together filling at least 150 of the 180 minutes.
+The tasks are a training path, not office work. Treat the user as a **beginner** at AI who must become an expert, one day at a time. Tasks do not have to involve their job; use practice material (a sample folder, a made-up problem, a public website) whenever that teaches the skill faster. Every daily report must include tasks, including the Saturday run that reviews Friday (Coach puts them on the next workday). Send 2 or 3 core tasks plus one stretch task (4 at most), all inside 9:00 to 12:00; the core tasks together fill at least 150 of the 180 minutes.
 
 **The path** (move up only when the current level's skill has been shown with evidence on 3 different days):
 
@@ -222,6 +222,13 @@ The tasks are a training path, not office work. Treat the user as a **beginner**
 | 7 | Subagents and parallel work; reviewing multiple outputs |
 | 8 | Automation: scheduled tasks, workflows that run without you |
 | 9 | Evals: testing AI output against acceptance criteria; comparing approaches |
+
+**Stretch task and finishing early.** Always send a fourth task whose title starts with "Stretch: ". It is a harder task from the next level (a preview), time box 30 to 45 minutes, for when the core tasks are done before 12:00. The 9:00 to 12:00 block always runs to 12:00:
+- Core tasks done early → the user moves straight to the stretch task.
+- Stretch task done too → the rest of the block is free practice with Claude on anything that builds skill; it counts in AI time and session analysis like everything else.
+- Any idle gap over 20 minutes before 12:00 still costs focus discipline, even after all tasks are done. Finishing early is not permission to stop.
+- Scoring: the task score averages the core tasks only. A stretch task done to its done-criterion adds +10 to the task score (max 100) and counts as an evidence day for the next level. A stretch task not done costs nothing, unless the time went idle.
+- All core tasks done early also triggers the speed rule below, and the report says what was done with the remaining minutes.
 
 Rules for every task:
 - A concrete output, a done-criterion the reviewer can verify from the sessions or chats (name the chat title or folder to use), and a time box in minutes.
