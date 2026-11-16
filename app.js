@@ -1,7 +1,7 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, FOCUS_START, FOCUS_END, VAPID_PUBLIC_KEY } from './config.js';
 
-const VERSION = '0.6.0';
+const VERSION = '0.6.1';
 const $app = document.getElementById('app');
 const $tabs = document.getElementById('tabs');
 const $toast = document.getElementById('toast');
@@ -13,9 +13,9 @@ const RUNNING = [
   ['Focus heads-up alert', '8:45 AM'],
   ['Focus start alert', '9:00 AM'],
   ['Noon check-in', '12:00 PM. Submitting it stops the timer.'],
-  ['Timer still running alerts', '12:15 PM and 12:30 PM'],
-  ['Timer stops automatically', '1:00 PM, if still running. Counts against Execution.'],
-  ['Timer closed', 'After 1:00 PM it cannot be started, until 9:00 next day.'],
+  ['Timer stops automatically', '12:15 PM, if still running. Counts against focus discipline.'],
+  ['Finish early', 'Only when every task, including the stretch task, is done: you may stop the timer and check in early.'],
+  ['Timer closed', 'After 12:15 PM it cannot be started, until 9:00 next day.'],
   ['Night log reminder', '9:45 PM'],
 ];
 const DEFAULT_PREFS = {
@@ -135,19 +135,20 @@ async function renderToday() {
   const live = sessions.find((s) => !s.ended_at);
   const doneMs = sessions.filter((s) => s.ended_at).reduce((a, s) => a + (new Date(s.ended_at) - new Date(s.started_at)), 0);
   const now = new Date();
-  const start = atTime(FOCUS_START), end = atTime(FOCUS_END), cutoff = atTime('13:00');
+  const start = atTime(FOCUS_START), end = atTime(FOCUS_END), cutoff = atTime('12:15');
   const closed = !live && now >= cutoff;
   const weekend = [0, 6].includes(now.getDay());
   const has = (k) => checkins.some((c) => c.kind === k);
   const active = tasks.filter((t) => t.status !== 'swapped');
   const done = active.filter((t) => t.status === 'done').length;
+  const allDone = active.length > 0 && done === active.length && active.some((t) => /^stretch:/i.test(t.title));
 
   let focusLabel;
   if (live) focusLabel = live.auto_started ? 'Focus block running · started automatically' : 'Focus block running';
   else if (weekend) focusLabel = 'Weekend: no focus block';
   else if (now < start) focusLabel = `Focus block starts at ${fmtTime(start)}`;
   else if (now < end) focusLabel = sessions.length ? 'Paused. The block is still on.' : 'You should be in your focus block now';
-  else focusLabel = sessions.some((x) => x.auto_stopped) ? 'Stopped automatically at 1:00 PM' : 'Focus block over';
+  else focusLabel = sessions.some((x) => x.auto_stopped) ? 'Stopped automatically at 12:15' : 'Focus block over';
 
   $app.innerHTML = `
     <h1>${now.toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' })}</h1>
@@ -156,7 +157,7 @@ async function renderToday() {
     <section class="card focus ${live ? 'live' : ''}">
       <div class="small muted">${esc(focusLabel)}</div>
       <div class="clock" id="clock">${fmtDur(doneMs + (live ? now - new Date(live.started_at) : 0))}</div>
-      ${closed ? '<button class="ghost" id="focusBtn" disabled>Closed until 9:00 tomorrow</button>' : `<button class="${live ? 'ghost' : 'primary'}" id="focusBtn">${live ? 'Stop' : 'Start focus'}</button>`}
+      ${closed ? '<button class="ghost" id="focusBtn" disabled>Closed until 9:00 tomorrow</button>' : `<button class="${live ? 'ghost' : 'primary'}" id="focusBtn">${live ? (allDone && now < end ? 'All tasks done: finish block early' : 'Stop') : 'Start focus'}</button>`}
     </section>
 
     <h2>Today's tasks</h2>
@@ -169,7 +170,7 @@ async function renderToday() {
     <h2>Check-ins</h2>
     <div class="card stack">
       <div class="row"><div class="grow"><strong>Noon check-in</strong><div class="small muted">Closes the block: stops the timer, records what got done</div></div>
-        ${has('noon') ? '<span class="badge">Done</span>' : `<button class="small" id="noonBtn" ${now < end && !weekend ? 'disabled' : ''}>Check in</button>`}</div>
+        ${has('noon') ? '<span class="badge">Done</span>' : `<button class="small" id="noonBtn" ${now < end && !weekend && !allDone ? 'disabled' : ''}>Check in</button>`}</div>
       <div class="row"><div class="grow"><strong>Night log</strong><div class="small muted">The rest of the day, and your self-rating</div></div>
         ${has('night') ? '<span class="badge">Done</span>' : '<button class="small" id="nightBtn">Log</button>'}</div>
     </div>`;
@@ -183,9 +184,11 @@ async function renderToday() {
   document.getElementById('focusBtn').onclick = async () => {
     if (live) {
       await sb.from('focus_sessions').update({ ended_at: new Date().toISOString() }).eq('id', live.id);
-      await logEvent('focus_stop'); toast('Focus stopped'); notifyLocal('Focus stopped.');
+      const early = allDone && new Date() < end;
+      await logEvent(early ? 'focus_finished_early' : 'focus_stop');
+      toast(early ? 'Block finished early. Do your noon check-in.' : 'Focus stopped'); notifyLocal(early ? 'Block finished early.' : 'Focus stopped.');
     } else {
-      if (new Date() >= atTime('13:00')) { toast('The timer is closed after 1:00 PM.'); return renderToday(); }
+      if (new Date() >= atTime('12:15')) { toast('The timer is closed after 12:15.'); return renderToday(); }
       const { error } = await sb.from('focus_sessions').insert({ day: today() });
       if (error) { toast(error.message); return renderToday(); }
       await logEvent('focus_start'); toast('Focus started. Phone down.'); notifyLocal('Focus started. Phone down.');
@@ -277,6 +280,7 @@ function noonDialog(tasks) {
     if (error) return error.message;
     // Closing the block stops any running timer
     await sb.from('focus_sessions').update({ ended_at: new Date().toISOString() }).eq('day', today()).is('ended_at', null);
+    if (new Date() < atTime(FOCUS_END)) await logEvent('focus_finished_early');
     await logEvent('noon_checkin');
   });
 }

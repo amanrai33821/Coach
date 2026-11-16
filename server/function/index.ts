@@ -143,18 +143,10 @@ async function tickUser(userId: string, prefs: Record<string, any>, now: ReturnT
     }
     if (slot === '12:00') {
       out.noon = await sendOnce(userId, `${date}:noon`, {
-        title: 'Noon check-in', body: 'Close the block: what did you actually produce?', tag: 'noon',
+        title: 'Noon check-in', body: 'Close the block: stop the timer and check in. It stops automatically at 12:15.', tag: 'noon',
       });
     }
-    // A timer still running after the block: reminders at 12:15 and 12:30, automatic stop at 1:00 PM.
-    if (slot === '12:15' || slot === '12:30') {
-      const { data: open } = await db.from('focus_sessions').select('id').eq('user_id', userId).eq('day', date).is('ended_at', null);
-      if (open?.length) {
-        out.timer = slot === '12:15'
-          ? await sendOnce(userId, `${date}:timer_1215`, { title: 'Timer still running', body: 'Stop it with your noon check-in.', tag: 'noon' })
-          : await sendOnce(userId, `${date}:timer_1230`, { title: 'Timer still running: second reminder', body: 'It stops automatically at 1:00 PM. Do your noon check-in now.', tag: 'noon' });
-      }
-    }
+    // A timer still running after the block stops automatically at 12:15 (see below).
     if (slot === '21:45' && !skipped.includes(date)) {
       const { data: night } = await db.from('checkins').select('id').eq('user_id', userId).eq('day', date).eq('kind', 'night');
       if (!night?.length) {
@@ -165,15 +157,15 @@ async function tickUser(userId: string, prefs: Record<string, any>, now: ReturnT
     }
   }
 
-  if (slot === '13:00') {
-    const stopAt = new Date(Date.parse(`${date}T13:00:00+05:30`)).toISOString();
+  if (slot === '12:15') {
+    const stopAt = new Date(Date.parse(`${date}T12:15:00+05:30`)).toISOString();
     const { data: stopped } = await db.from('focus_sessions').update({ ended_at: stopAt, auto_stopped: true })
       .eq('user_id', userId).is('ended_at', null).lte('started_at', stopAt).select('id, day');
     if (stopped?.length) {
-      await db.from('events').insert({ user_id: userId, source: 'app', kind: 'focus_auto_stopped', payload: { sessions: stopped.length, at: '13:00' } });
+      await db.from('events').insert({ user_id: userId, source: 'app', kind: 'focus_auto_stopped', payload: { sessions: stopped.length, at: '12:15' } });
       if (stopped.some((x: any) => x.day === date)) {
         out.auto_stop = await sendOnce(userId, `${date}:timer_autostop`, {
-          title: 'Timer stopped at 1:00 PM', body: 'You never stopped it. This counts against Execution. Do your noon check-in now.', tag: 'noon',
+          title: 'Timer stopped at 12:15', body: 'You never stopped it. This counts against focus discipline. Do your noon check-in now.', tag: 'noon',
         });
       }
     }
