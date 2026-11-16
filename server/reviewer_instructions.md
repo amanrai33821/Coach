@@ -184,7 +184,7 @@ Read the full replies (fetch shortened ones with `event`) whenever you need them
 
     **Scores: 41 overall · Below par.** Task score 22 (Failing). Work score 60 (Solid). One blunt verdict sentence.
 
-    **Tasks:** one short paragraph per task: what it was, what the evidence shows, its score. Then focus discipline and check-ins, with times.
+    **Tasks:** one short paragraph per task: what it was, what the evidence shows, minutes taken against the time box, its score, and how tomorrow's tasks were adjusted (shorter or harder). Then the current level on the upskilling path. Then focus discipline and check-ins, with times.
 
     **Time on Claude:** total active minutes against the 300-minute benchmark, how much fell in the focus block, the longest idle gaps with times, and where the day leaked.
 
@@ -205,14 +205,36 @@ Read the full replies (fetch shortened ones with `event`) whenever you need them
 
 The verdict sentence in `scores.verdict` must be one sentence. Anything that does not change what they do next gets cut, but do not cut the session analysis.
 
-## Today's tasks
+## Today's tasks: the upskilling path
 
-Every daily report must include tasks, including the Saturday run that reviews Friday: Coach puts them on the next workday (today, or Monday when the run is on a weekend). Send 2 or 3 tasks in `tasks`, all inside 9:00 to 12:00, on AI upskilling or real work only:
-- Each has a concrete output, a done-criterion that can be checked from the sessions, and a time box in minutes. Together they fill at least 150 of the 180 minutes.
-- At least one applies AI to a real work deliverable.
-- At least one fixes the weakness the report found (for example: a repeated manual operation becomes a saved skill).
-- Difficulty rises after strong days. It never drops because they skipped. A task not done carries over to the next day, made more specific.
-- Draw on the skills ledger: when a technique is "not_tried" and fits their work, make one task practise it.
+The tasks are a training path, not office work. Treat the user as a **beginner** at AI who must become an expert, one day at a time. Tasks do not have to involve their job; use practice material (a sample folder, a made-up problem, a public website) whenever that teaches the skill faster. Every daily report must include tasks, including the Saturday run that reviews Friday (Coach puts them on the next workday). Send 2 or 3 tasks, all inside 9:00 to 12:00, together filling at least 150 of the 180 minutes.
+
+**The path** (move up only when the current level's skill has been shown with evidence on 3 different days):
+
+| Level | Skill |
+| --- | --- |
+| 1 | Prompt anatomy: goal, context, constraints, examples, done-criteria; comparing weak and strong prompts |
+| 2 | Iterating and critiquing: asking Claude to critique, verify and challenge its own output; catching errors |
+| 3 | Reusable context: Projects with instructions, CLAUDE.md files |
+| 4 | Claude Code basics: files, plan mode, reading diffs, running and checking what it built |
+| 5 | Skills: writing and using a skill for a repeated job |
+| 6 | Data and tools: connectors, working with real files and data, building small tools |
+| 7 | Subagents and parallel work; reviewing multiple outputs |
+| 8 | Automation: scheduled tasks, workflows that run without you |
+| 9 | Evals: testing AI output against acceptance criteria; comparing approaches |
+
+Rules for every task:
+- A concrete output, a done-criterion the reviewer can verify from the sessions or chats (name the chat title or folder to use), and a time box in minutes.
+- Tough for the current level: each task must make the user do something they have not done before, or do it with less help. Never repeat a task that was completed.
+- A task not done carries over the next day, made more specific; it does not get easier.
+- Draw on the skills ledger: a "not_tried" technique at or below the current level should become a task.
+
+**Speed rule (time box adjusts to performance).** For each task marked done, measure the minutes taken: from the later of 9:00, the focus timer start, or the previous task's `completed_at`, to this task's `completed_at`; check it against the session activity for that task. Then:
+- Done to the done-criterion in **70% of the time box or less**: the next task of that kind gets either a time box cut by 25% or a clearly harder version at the same time box (pick the harder version if the time box is already 30 minutes or less). Say which in the report.
+- Done in 70 to 100% of the time box: keep the time box, raise difficulty slightly.
+- Over the time box: keep the time box and difficulty; flag `over-time`.
+- Marked done but the done-criterion is not met: it does not count as fast; it scores as in the task rubric.
+Record the measurement in each task item (`minutes_taken`, `time_box_min`, `speed`: "fast", "on-time", "over" or "not-done") and keep the path's state in `scores.progression`: current level, the evidence days counted toward the next level, and the adjustment made for the next tasks. Read the previous report's `progression` from `history` to continue it.
 
 ## Report JSON
 
@@ -227,7 +249,7 @@ POST this with action `report`:
         "verdict": "one sentence",
         "task": {
           "score": 22, "grade": "Failing", "why": "one line",
-          "items": [{"title": "...", "score": 0, "why": "evidence"}],
+          "items": [{"title": "...", "score": 100, "why": "evidence", "minutes_taken": 31, "time_box_min": 50, "speed": "fast"}],
           "focus_discipline": {"score": 45, "why": "..."},
           "checkins": {"score": 40, "why": "..."}
         },
@@ -245,6 +267,7 @@ POST this with action `report`:
         "caps_applied": ["No night log: capped at 35"],
         "flags": ["retyped-context"],
         "patterns": {"active": [{"name": "retyped-context", "days": 3}], "cleared": []},
+        "progression": {"level": 1, "evidence_days": ["2026-11-17"], "adjustment": "task 1 done in 31 of 50 min: next prompt drill is 40 min"},
         "questions": ["question one", "question two", "question three"],
         "self_rating": 7, "self_gap_flag": true,
         "coverage": {"terminal_sessions": 4, "terminal_prompts": 31, "chats": 3, "chat_messages": 12, "chat_titles": ["..."], "checkins": "noon yes, night no", "incomplete": []}
