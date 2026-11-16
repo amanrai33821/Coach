@@ -1,7 +1,7 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, FOCUS_START, FOCUS_END, VAPID_PUBLIC_KEY } from './config.js';
 
-const VERSION = '0.5.3';
+const VERSION = '0.6.0';
 const $app = document.getElementById('app');
 const $tabs = document.getElementById('tabs');
 const $toast = document.getElementById('toast');
@@ -293,13 +293,19 @@ function outcomeDialog() {
   });
 }
 
-function nightDialog() {
+async function nightDialog() {
+  // The latest daily report's tough questions must be answered here
+  const { data: last } = await sb.from('reports').select('scores').eq('kind', 'daily').order('day', { ascending: false }).limit(1);
+  const qs = (last?.[0]?.scores?.questions || []).slice(0, 3);
+  const qHtml = qs.map((q, i) => `<div><label>${esc(q)}</label><textarea name="q${i}" required></textarea></div>`).join('');
   openDialog(`<h2 style="margin-top:0">Night log</h2>
+    ${qs.length ? `<p class="small muted">Answer this morning's questions honestly and specifically. Vague answers score zero.</p>${qHtml}` : ''}
     <div><label>What else did you do today that matters? (work, AI, learning)</label><textarea name="log" required></textarea></div>
-    <div><label>Where did you use AI at work today, and what did it change?</label><textarea name="ai_at_work"></textarea></div>
+    <div><label>Where did you use AI at work today, and what did it change?</label><textarea name="ai_at_work" required></textarea></div>
     <div><label>Rate your day honestly, 1 to 10</label><input name="self_rating" type="number" min="1" max="10" required></div>`,
   async (f) => {
-    const { error } = await sb.from('checkins').insert({ day: today(), kind: 'night', content: { log: f.log, ai_at_work: f.ai_at_work }, self_rating: Number(f.self_rating) });
+    const answers = qs.map((q, i) => ({ question: q, answer: f['q' + i] || '' }));
+    const { error } = await sb.from('checkins').insert({ day: today(), kind: 'night', content: { log: f.log, ai_at_work: f.ai_at_work, answers }, self_rating: Number(f.self_rating) });
     if (error) return error.message;
     await logEvent('night_log');
   });
@@ -328,7 +334,13 @@ async function renderReport() {
   const score = s.overall ?? s.weekly_score;
   let pdf = '';
   if (r.pdf_path) { const { data: u } = await sb.storage.from('reports').createSignedUrl(r.pdf_path, 3600); if (u) pdf = `<a class="btn" href="${u.signedUrl}" target="_blank" rel="noopener">Open PDF</a>`; }
-  const dims = s.dimensions ? Object.entries(DIM_NAMES).filter(([k]) => s.dimensions[k]).map(([k, n]) =>
+  const bar = (n, v, sub) => `<div class="dim"${sub ? ' style="opacity:.75;font-size:.92em;padding-left:12px"' : ''}><span>${esc(n)}</span><div class="bar"><i style="width:${Math.max(0, Math.min(100, Number(v) || 0))}%"></i></div><b>${esc(v)}</b></div>`;
+  const WORK_NAMES = { ai_time: 'AI time', ai_work: 'AI at work', prompting: 'Prompting', independence: 'Independence' };
+  const dims = (s.task || s.work) ? [
+    s.task ? bar('Task score', s.task.score) : '',
+    s.work ? bar('Work score', s.work.score) : '',
+    ...Object.entries(WORK_NAMES).filter(([k]) => s.work?.dimensions?.[k]).map(([k, n]) => bar(n, s.work.dimensions[k].score, true)),
+  ].join('') : s.dimensions ? Object.entries(DIM_NAMES).filter(([k]) => s.dimensions[k]).map(([k, n]) =>
     `<div class="dim"><span>${esc(n)}</span><div class="bar"><i style="width:${Math.max(0, Math.min(100, Number(s.dimensions[k].score) || 0))}%"></i></div><b>${esc(s.dimensions[k].score)}</b></div>`).join('') : '';
   $app.innerHTML = `<h1>${esc(KIND_TITLE[r.kind] || 'Report')}</h1>
     <p class="muted" style="margin-top:0">${new Date(r.day + 'T00:00:00').toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' })}${s.provisional ? ' · provisional' : ''}</p>

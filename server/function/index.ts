@@ -69,6 +69,45 @@ async function sendOnce(userId: string, key: string, msg: Push) {
   return `sent to ${sent}`;
 }
 
+async function configValue(userId: string, key: string): Promise<string | null> {
+  const { data } = await db.from('coach_config').select('value').eq('user_id', userId).eq('key', key).maybeSingle();
+  return data?.value ?? null;
+}
+
+// Active Claude Code time. Gaps of 10 minutes or less between consecutive events count in full;
+// each event with no neighbour within 10 minutes counts 2 minutes. Focus block = 9:00 to 12:00 IST.
+function activeUsage(events: any[], day: string) {
+  const GAP = 10 * 60000, LONE = 2 * 60000;
+  const blockStart = Date.parse(day + 'T09:00:00+05:30'), blockEnd = Date.parse(day + 'T12:00:00+05:30');
+  const overlap = (a: number, b: number) => Math.max(0, Math.min(b, blockEnd) - Math.max(a, blockStart));
+  const spans = (times: number[]) => {
+    const out: [number, number][] = [];
+    for (let i = 0; i < times.length; i++) {
+      const t = times[i], next = times[i + 1], prev = times[i - 1];
+      if (next !== undefined && next - t <= GAP) out.push([t, next]);
+      else if (prev === undefined || t - prev > GAP) out.push([t, t + LONE]);
+    }
+    return out;
+  };
+  const all = events.map((e) => Date.parse(e.occurred_at)).sort((a, b) => a - b);
+  const s = spans(all);
+  const per_session: Record<string, number> = {};
+  const bySess: Record<string, number[]> = {};
+  for (const e of events) (bySess[e.session_id || 'unknown'] ??= []).push(Date.parse(e.occurred_at));
+  for (const [k, ts] of Object.entries(bySess)) per_session[k] = Math.round(spans(ts.sort((a, b) => a - b)).reduce((n, [a, b]) => n + b - a, 0) / 60000);
+  // Idle gaps over 20 minutes inside the block (Claude Code only; the reviewer adds chat and app activity)
+  const inBlock = all.filter((t) => t >= blockStart && t < blockEnd);
+  const marks = [blockStart, ...inBlock, blockEnd];
+  const fmt = (t: number) => new Date(t + 5.5 * 3600000).toISOString().slice(11, 16);
+  const focus_block_gaps: string[] = [];
+  for (let i = 1; i < marks.length; i++) if (marks[i] - marks[i - 1] > 20 * 60000) focus_block_gaps.push(`${fmt(marks[i - 1])}-${fmt(marks[i])} (${Math.round((marks[i] - marks[i - 1]) / 60000)} min)`);
+  return {
+    active_min: Math.round(s.reduce((n, [a, b]) => n + b - a, 0) / 60000),
+    focus_block_min: Math.round(s.reduce((n, [a, b]) => n + overlap(a, b), 0) / 60000),
+    per_session, focus_block_gaps,
+  };
+}
+
 async function skipDays(userId: string): Promise<string[]> {
   const { data } = await db.from('coach_config').select('value').eq('user_id', userId).eq('key', 'skip_days').maybeSingle();
   try { const v = JSON.parse(data?.value ?? '[]'); return Array.isArray(v) ? v.map(String) : []; } catch { return []; }
@@ -319,7 +358,8 @@ async function buildContext(conn: any, requested?: string) {
     return (count ?? 0) > 0;
   };
   const skipped = await skipDays(uid);
-  if (prefs.daily !== false && isWorkday(reviewDay) && (requested || isFirstRun || (!skipped.includes(reviewDay) && !(await has(reviewDay, 'daily'))))) due.push('daily');
+  const freshStart = await configValue(uid, 'fresh_start');
+  if (prefs.daily !== false && isWorkday(reviewDay) && (!freshStart || requested || reviewDay >= freshStart) && (requested || isFirstRun || (!skipped.includes(reviewDay) && !(await has(reviewDay, 'daily'))))) due.push('daily');
   const friday = addDays(today, -2);
   if (now.weekday === 0 && prefs.weekly !== false && !(await has(friday, 'weekly'))) due.push('weekly');
   const lastOfMonth = addDays(today, -1);
@@ -334,7 +374,7 @@ async function buildContext(conn: any, requested?: string) {
       .gte('occurred_at', win.start_utc).lt('occurred_at', win.end_utc).order('occurred_at').limit(5000),
     db.from('events').select('occurred_at, kind, payload').eq('user_id', uid).eq('source', 'app')
       .gte('occurred_at', win.start_utc).lt('occurred_at', win.end_utc).order('occurred_at'),
-    db.from('reports').select('day, kind, scores, created_at').eq('user_id', uid).order('day', { ascending: false }).limit(10),
+    db.from('reports').select('day, kind, scores, created_at').eq('user_id', uid).gte('day', freshStart ?? '0000-00-00').order('day', { ascending: false }).limit(10),
     db.from('skills_ledger').select('skill, why, ladder, status, evidence_count').eq('user_id', uid).neq('status', 'rejected'),
     db.from('connections').select('created_at, last_seen_at, meta').eq('user_id', uid).eq('kind', 'mac').is('revoked_at', null).order('last_seen_at', { ascending: false, nullsFirst: false }).limit(1),
   ]);
@@ -350,13 +390,19 @@ async function buildContext(conn: any, requested?: string) {
     else if (e.kind === 'tool') { const n = String(e.payload?.name ?? 'tool'); g.tools[n] = (g.tools[n] ?? 0) + 1; }
   }
   const sessionsList = Object.values(bySession);
+  const usage = activeUsage(ccEvents.data ?? [], reviewDay);
+  for (const g of sessionsList) g.active_min = usage.per_session[g.session_id] ?? 0;
+  // Questions the previous daily report asked; tonight's log must answer them
+  const lastDaily = (history.data ?? []).find((r: any) => r.kind === 'daily' && r.day < reviewDay);
+  const yesterdayQuestions = lastDaily?.scores?.questions ?? [];
   const mac = macConn.data?.[0] ?? null;
 
   const ctx: Record<string, unknown> = {
     today, weekday: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][now.weekday], review_day: reviewDay,
     review_weekday: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][weekdayOf(reviewDay)],
     due, window: win, timezone: TZ, is_first_run: isFirstRun, skipped_days: skipped,
-    calibration: Date.now() - Date.parse(conn.created_at ?? new Date().toISOString()) < 14 * DAY_MS,
+    calibration: freshStart ? reviewDay < addDays(freshStart, 14) : Date.now() - Date.parse(conn.created_at ?? new Date().toISOString()) < 14 * DAY_MS,
+    fresh_start: freshStart,
     connections: { mac: mac?.last_seen_at ? { linked: true, last_seen_at: mac.last_seen_at, device: mac.meta?.device ?? null, uploads_waiting: Number(mac.meta?.queued ?? 0) } : { linked: false, note: mac ? 'setup started but the Mac never checked in' : 'not linked' } },
     prefs,
     tasks: tasks.data ?? [], focus_sessions: sessions.data ?? [], checkins: checkins.data ?? [],
@@ -365,6 +411,8 @@ async function buildContext(conn: any, requested?: string) {
       prompts: sessionsList.reduce((n, g) => n + g.prompts.length, 0),
       by_session: sessionsList,
     },
+    usage: { claude_code: { active_min: usage.active_min, focus_block_min: usage.focus_block_min, focus_block_gaps: usage.focus_block_gaps, method: 'gaps of 10 min or less count in full; each isolated event counts 2 min' } },
+    yesterday_questions: yesterdayQuestions,
     app_events: appEvents.data ?? [],
     history: history.data ?? [], ledger: ledger.data ?? [],
   };
@@ -372,7 +420,7 @@ async function buildContext(conn: any, requested?: string) {
   if (due.includes('weekly')) {
     const monday = addDays(friday, -4);
     const [{ data: dailies }, { data: outcome }] = await Promise.all([
-      db.from('reports').select('day, scores, body_md').eq('user_id', uid).eq('kind', 'daily').gte('day', monday).lte('day', friday).order('day'),
+      db.from('reports').select('day, scores, body_md').eq('user_id', uid).eq('kind', 'daily').gte('day', freshStart && freshStart > monday ? freshStart : monday).lte('day', friday).order('day'),
       db.from('checkins').select('day, content, created_at').eq('user_id', uid).eq('kind', 'weekly_outcome').gte('day', monday).lte('day', today),
     ]);
     ctx.week = { monday, friday, daily_reports: dailies ?? [], outcome_entry: outcome ?? [] };
@@ -422,7 +470,14 @@ export async function makePdf(day: string, kind: string, scores: any, body: stri
   const overall = scores?.overall ?? scores?.weekly_score;
   if (overall != null) line(`${overall}  ${scores?.grade ?? ''}${scores?.provisional ? '   (provisional)' : ''}`, bold, 28, ink, 14);
   const dims = scores?.dimensions;
-  if (dims) {
+  if (scores?.task || scores?.work) {
+    if (scores.task) line(`Task score: ${scores.task.score} ${scores.task.grade ?? ''}. ${scores.task.why ?? ''}`, bold, 10.5, ink, 4);
+    if (scores.work) line(`Work score: ${scores.work.score} ${scores.work.grade ?? ''}. ${scores.work.why ?? ''}`, bold, 10.5, ink, 4);
+    const wn: Record<string, string> = { ai_time: 'AI time', ai_work: 'AI applied to real work', prompting: 'Prompting', independence: 'Independence' };
+    const wd = scores.work?.dimensions ?? {};
+    for (const k of Object.keys(wn)) if (wd[k]) line(`${wn[k]}: ${wd[k].score}. ${wd[k].why ?? ''}`, font, 9.5, quiet, 3, 12);
+    y -= 12;
+  } else if (dims) {
     const names: Record<string, string> = { execution: 'Execution (35%)', ai_work: 'AI applied to real work (20%)', prompting: 'Prompting skill (20%)', independence: 'Independence (25%)' };
     for (const k of Object.keys(names)) if (dims[k]) line(`${names[k]}: ${dims[k].score}. ${dims[k].why ?? ''}`, font, 9.5, quiet, 3);
     y -= 12;
